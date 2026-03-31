@@ -1,36 +1,29 @@
-# -*- coding: utf-8 -*-
-"""
-使用 HyperLPR3 进行车牌识别
-专门针对中国车牌优化的识别库（新版本，兼容性更好）
-"""
 import json
+import logging
+import os
 import re
 import sys
 from pathlib import Path
+
 import cv2
+import numpy as np
 import hyperlpr3 as lpr3
 
-# 设置环境变量以解决编码问题
-import os
-os.environ['PYTHONIOENCODING'] = 'UTF-8'
+os.environ.setdefault("PYTHONIOENCODING", "UTF-8")
 
-print("=" * 70)
-print("HyperLPR3 车牌识别工具")
-print("=" * 70)
-print("\n正在初始化HyperLPR3...")
+_log = logging.getLogger(__name__)
 
-# 初始化HyperLPR3（使用高精度检测）
 try:
     catcher = lpr3.LicensePlateCatcher(detect_level=lpr3.DETECT_LEVEL_HIGH)
-    print("HyperLPR3初始化完成！")
+    _log.debug("HyperLPR3 已加载 (DETECT_LEVEL_HIGH)")
 except Exception as e:
-    print(f"HyperLPR3初始化失败: {e}")
-    print("可能需要先下载模型文件...")
+    _log.warning("HyperLPR3 高精度初始化失败: %s，尝试默认级别", e)
     try:
         catcher = lpr3.LicensePlateCatcher()
-        print("使用默认检测级别初始化成功")
-    except:
+        _log.debug("HyperLPR3 已加载 (默认检测级别)")
+    except Exception:
         catcher = None
+        _log.error("HyperLPR3 初始化失败，车牌识别将不可用")
 
 # ========== 车牌号格式验证函数 ==========
 def is_valid_license_plate(plate_text):
@@ -93,7 +86,7 @@ def recognize_license_plate(image_input):
             # 文件路径
             image = cv2.imread(str(image_input))
             if image is None:
-                print(f"错误: 无法读取图像 {image_input}")
+                _log.warning("无法读取图像: %s", image_input)
                 return {
                     "plate_text": None,
                     "plate_texts": [],
@@ -127,7 +120,7 @@ def recognize_license_plate(image_input):
         # 调用HyperLPR3识别
         # 返回格式: [[车牌号, 置信度, 类型, 位置], ...]
         if catcher is None:
-            print("错误: HyperLPR3未初始化")
+            _log.error("HyperLPR3 未初始化")
             return {
                 "plate_text": None,
                 "plate_texts": [],
@@ -175,7 +168,6 @@ def recognize_license_plate(image_input):
                 continue
             
             # 处理numpy类型
-            import numpy as np
             if isinstance(plate_text, np.ndarray):
                 plate_text = plate_text.tolist()[0] if plate_text.size > 0 else ''
             if isinstance(confidence, (np.float32, np.float64)):
@@ -243,9 +235,7 @@ def recognize_license_plate(image_input):
         }
         
     except Exception as e:
-        print(f"OCR识别出错: {e}")
-        import traceback
-        traceback.print_exc()
+        _log.exception("OCR 识别出错: %s", e)
         return {
             "plate_text": None,
             "plate_texts": [],
@@ -270,7 +260,7 @@ def batch_process_folder(folder_path, output_file="hyperlpr3_results.json"):
     """
     folder = Path(folder_path)
     if not folder.exists():
-        print(f"错误: 文件夹不存在: {folder_path}")
+        _log.error("文件夹不存在: %s", folder_path)
         return []
     
     # 支持的图片格式
@@ -281,21 +271,16 @@ def batch_process_folder(folder_path, output_file="hyperlpr3_results.json"):
                    if f.suffix.lower() in image_extensions]
     
     if not image_files:
-        print(f"错误: 文件夹中没有找到图片文件: {folder_path}")
+        _log.error("文件夹中无图片: %s", folder_path)
         return []
-    
-    print(f"\n找到 {len(image_files)} 张图片，开始处理...")
-    print("=" * 70)
-    
+
+    _log.info("批量识别 %s 张图片", len(image_files))
     results = []
     success_count = 0
     fail_count = 0
     
     # 处理每张图片
     for idx, image_file in enumerate(image_files, 1):
-        print(f"\n[{idx}/{len(image_files)}] 处理: {image_file.name}")
-        print("-" * 60)
-        
         try:
             # 调用OCR识别
             result = recognize_license_plate(str(image_file))
@@ -316,15 +301,11 @@ def batch_process_folder(folder_path, output_file="hyperlpr3_results.json"):
                 results.append(result_item)
                 success_count += 1
                 
-                # 显示识别结果
                 all_plates = result.get("plate_texts", [])
                 if all_plates:
-                    if len(all_plates) == 1:
-                        print(f"识别成功 [HyperLPR3]: {all_plates[0]}")
-                    else:
-                        print(f"识别成功 [HyperLPR3]: {len(all_plates)} 个车牌号 - {', '.join(all_plates)}")
+                    _log.debug("[%s/%s] %s -> %s", idx, len(image_files), image_file.name, all_plates)
                 else:
-                    print(f"识别成功，但未提取到车牌号")
+                    _log.debug("[%s/%s] %s 无车牌文本", idx, len(image_files), image_file.name)
             else:
                 result_item = {
                     "image_file": str(image_file),
@@ -338,10 +319,10 @@ def batch_process_folder(folder_path, output_file="hyperlpr3_results.json"):
                 }
                 results.append(result_item)
                 fail_count += 1
-                print(f"识别失败")
-                
+                _log.warning("[%s/%s] %s 识别失败", idx, len(image_files), image_file.name)
+
         except Exception as e:
-            print(f"处理出错: {e}")
+            _log.warning("处理 %s 出错: %s", image_file.name, e)
             result_item = {
                 "image_file": str(image_file),
                 "image_name": image_file.name,
@@ -361,23 +342,16 @@ def batch_process_folder(folder_path, output_file="hyperlpr3_results.json"):
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     
-    # 打印统计信息
-    print("\n" + "=" * 70)
-    print("批量处理完成！")
-    print("=" * 70)
-    print(f"总图片数: {len(image_files)}")
-    print(f"成功: {success_count}")
-    print(f"失败: {fail_count}")
-    print(f"结果已保存到: {output_file}")
-    print("=" * 70)
-    
+    _log.info("完成: 成功 %s 失败 %s，结果 -> %s", success_count, fail_count, output_file)
     return results
 
 # ========== 主程序 ==========
 if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description='使用HyperLPR3进行车牌OCR识别')
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    parser = argparse.ArgumentParser(description="使用 HyperLPR3 进行车牌 OCR")
     parser.add_argument('folder', nargs='?', 
                        default=r'D:\vehicle_detection_project\runs\detect\test_results\predictions',
                        help='包含车牌图片的文件夹路径')
