@@ -1,179 +1,295 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-测试禁停区域配置功能
-"""
-
 import sys
 import json
 from pathlib import Path
+import cv2
 
 # 添加项目路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from configure_zones import ZoneConfigurator
+from chinese_text_draw import cv2_put_text_unicode
 
-def test_zone_config():
-    """测试禁停区域配置"""
-    print("测试禁停区域配置功能")
-    print("=" * 50)
+class ZoneConfigurator:
+    """禁停区域配置器"""
 
-    # 使用测试图片
-    test_image = "test_plate_1.jpg"
+    def __init__(self, media_path: str = None, output_dir: str = "output"):
+        self.media_path = media_path
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(exist_ok=True)
+        self.zones_file = self.output_dir / "no_parking_zones.json"
 
-    if not Path(test_image).exists():
-        print(f"测试图片不存在: {test_image}")
-        return
+        # 加载现有配置
+        self.zones = self.load_zones()
 
-    # 创建配置器
-    configurator = ZoneConfigurator(test_image, "output")
+        # 鼠标交互状态
+        self.drawing = False
+        self.start_point = None
+        self.current_zone = None
 
-    print(f"已加载 {len(configurator.zones)} 个现有禁停区域")
+        # 媒体信息
+        self.is_video = self._check_is_video(media_path)
+        self.background_frame = None
+        self.cap = None
 
-    # 添加几个测试禁停区域
-    test_zones = [
+    def _check_is_video(self, path: str) -> bool:
+        """检查文件是否为视频"""
+        if not path:
+            return False
+        path_obj = Path(path)
+        if not path_obj.exists():
+            return False
+
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv']
+        return path_obj.suffix.lower() in video_extensions
+
+    def _extract_background_frame(self):
+        """从视频中提取背景帧"""
+        if not self.is_video or not self.media_path:
+            return None
+
+        try:
+            self.cap = cv2.VideoCapture(self.media_path)
+            if not self.cap.isOpened():
+                print(f"无法打开视频: {self.media_path}")
+                return None
+
+            # 读取第一帧
+            ret, frame = self.cap.read()
+            if ret:
+                print(f"已提取视频背景帧，尺寸: {frame.shape}")
+                return frame
+            else:
+                print("无法读取视频帧")
+                return None
+
+        except Exception as e:
+            print(f"提取视频帧失败: {e}")
+            return None
+
+    def load_zones(self):
+        """加载禁停区域配置"""
+        if self.zones_file.exists():
+            try:
+                with open(self.zones_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"加载配置失败: {e}")
+        return []
+
+    def save_zones(self):
+        """保存禁停区域配置"""
+        try:
+            with open(self.zones_file, 'w', encoding='utf-8') as f:
+                json.dump(self.zones, f, indent=2, ensure_ascii=False)
+            print(f"配置已保存到: {self.zones_file}")
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+
+    def mouse_callback(self, event, x, y, flags, param):
+        """鼠标事件回调"""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # 开始绘制
+            self.drawing = True
+            self.start_point = (x, y)
+            print(f"开始绘制禁停区域: ({x}, {y})")
+
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if self.drawing:
+                # 更新当前区域预览
+                self.current_zone = [self.start_point[0], self.start_point[1], x, y]
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            if self.drawing:
+                # 完成绘制
+                self.drawing = False
+                end_point = (x, y)
+
+                # 确保坐标正确
+                x1 = min(self.start_point[0], end_point[0])
+                y1 = min(self.start_point[1], end_point[1])
+                x2 = max(self.start_point[0], end_point[0])
+                y2 = max(self.start_point[1], end_point[1])
+
+                # 添加新区域
+                zone_name = f"禁停区_{len(self.zones) + 1}"
+                new_zone = {
+                    "name": zone_name,
+                    "type": "rectangle",
+                    "bbox": [x1, y1, x2, y2],
+                    "color": [0, 0, 255],
+                    "description": f"用户定义的禁停区域 {len(self.zones) + 1}"
+                }
+
+                self.zones.append(new_zone)
+                print(f"已添加禁停区域: {zone_name} -> [{x1},{y1},{x2},{y2}]")
+                self.current_zone = None
+
+    def draw_zones(self, frame):
+        """绘制禁停区域"""
+        display_frame = frame.copy()
+
+        # 绘制已保存的区域
+        for zone in self.zones:
+            if zone["type"] == "rectangle":
+                x1, y1, x2, y2 = zone["bbox"]
+                color = tuple(zone["color"])
+                thickness = 3
+
+                # 绘制边框
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, thickness)
+
+                # 绘制半透明填充
+                overlay = display_frame.copy()
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+                alpha = 0.3
+                cv2.addWeighted(overlay, alpha, display_frame, 1 - alpha, 0, display_frame)
+
+                # 绘制标签
+                label = zone['name']
+                display_frame = cv2_put_text_unicode(
+                    display_frame, label, (x1, y1 - 10),
+                    font_size_px=18, color_bgr=tuple(int(c) for c in color), anchor="ls",
+                )
+
+                # 绘制禁止图标
+                center_x = (x1 + x2) // 2
+                center_y = (y1 + y2) // 2
+                cv2.circle(display_frame, (center_x, center_y), 25, color, 3)
+                cv2.line(display_frame, (center_x - 15, center_y - 15),
+                        (center_x + 15, center_y + 15), color, 3)
+
+        # 绘制当前正在绘制的区域
+        if self.current_zone:
+            x1, y1, x2, y2 = self.current_zone
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+
+        # 绘制操作提示
+        instructions = [
+            "鼠标左键拖拽绘制禁停区域",
+            "按 's' 保存配置",
+            "按 'c' 清空所有区域",
+            "按 'q' 退出"
+        ]
+
+        for i, instruction in enumerate(instructions):
+            display_frame = cv2_put_text_unicode(
+                display_frame, instruction, (10, 30 + i * 30),
+                font_size_px=18, color_bgr=(255, 255, 255), anchor="ls",
+            )
+
+        return display_frame
+
+    def run_configuration(self):
+        """运行配置界面"""
+        if not self.media_path:
+            print("请提供背景媒体路径（图片或视频）")
+            return
+
+        # 获取背景帧
+        if self.is_video:
+            image = self._extract_background_frame()
+            if image is None:
+                print("无法从视频提取背景帧")
+                return
+        else:
+            # 读取背景图片
+            image = cv2.imread(self.media_path)
+            if image is None:
+                print(f"无法读取图片: {self.media_path}")
+                return
+
+        print("=" * 60)
+        print("禁停区域配置工具")
+        print("=" * 60)
+        print("操作说明:")
+        print("  鼠标左键拖拽: 绘制禁停区域")
+        print("  按 's': 保存配置")
+        print("  按 'c': 清空所有区域")
+        print("  按 'q': 退出")
+        print("=" * 60)
+
+        # 创建窗口
+        cv2.namedWindow('禁停区域配置', cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback('禁停区域配置', self.mouse_callback)
+
+        while True:
+            # 绘制界面
+            display_frame = self.draw_zones(image)
+
+            # 显示区域统计
+            stats_text = f"当前禁停区域数量: {len(self.zones)}"
+            display_frame = cv2_put_text_unicode(
+                display_frame, stats_text, (10, display_frame.shape[0] - 40),
+                font_size_px=22, color_bgr=(255, 255, 255), anchor="ls",
+            )
+
+            cv2.imshow('禁停区域配置', display_frame)
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                print("退出配置")
+                break
+            elif key == ord('s'):
+                self.save_zones()
+                print("配置已保存")
+            elif key == ord('c'):
+                self.zones = []
+                print("已清空所有禁停区域")
+
+        cv2.destroyAllWindows()
+
+        # 释放视频资源
+        if self.cap:
+            self.cap.release()
+
+def create_default_zones(image_width: int = 1920, image_height: int = 1080):
+    """创建默认禁停区域配置"""
+    zones = [
         {
-            "name": "测试禁停区1",
-            "bbox": [100, 100, 400, 300],
-            "description": "左上角测试区域"
+            "name": "路边禁停区",
+            "type": "rectangle",
+            "bbox": [100, 200, int(image_width * 0.6), int(image_height * 0.8)],
+            "color": [0, 0, 255],
+            "description": "道路两侧禁停区域"
         },
         {
-            "name": "测试禁停区2",
-            "bbox": [800, 200, 1200, 400],
-            "description": "右上角测试区域"
+            "name": "交叉口禁停区",
+            "type": "rectangle",
+            "bbox": [int(image_width * 0.7), int(image_height * 0.3),
+                    int(image_width * 0.9), int(image_height * 0.7)],
+            "color": [0, 0, 255],
+            "description": "交叉路口禁停区域"
         }
     ]
-
-    for zone in test_zones:
-        new_zone = {
-            "name": zone["name"],
-            "type": "rectangle",
-            "bbox": zone["bbox"],
-            "color": [0, 0, 255],
-            "description": zone["description"]
-        }
-        configurator.zones.append(new_zone)
-
-    print(f"已添加 {len(test_zones)} 个测试禁停区域")
-    print(f"当前共有 {len(configurator.zones)} 个禁停区域")
-
-    # 显示所有区域
-    print("\n当前禁停区域列表:")
-    for i, zone in enumerate(configurator.zones, 1):
-        print(f"  {i}. {zone['name']}: {zone['bbox']} - {zone['description']}")
-
-    # 保存配置
-    configurator.save_zones()
-
-    print("\n禁停区域配置测试完成")
-    print("配置文件已保存到: output/no_parking_zones.json")
-    # 验证配置文件
-    zones_file = Path("output/no_parking_zones.json")
-    if zones_file.exists():
-        with open(zones_file, 'r', encoding='utf-8') as f:
-            saved_zones = json.load(f)
-        print(f"配置文件验证: 包含 {len(saved_zones)} 个禁停区域 [OK]")
-
-    return True
-
-def create_video_zones_config():
-    """为用户视频创建禁停区域配置"""
-    print("\n为用户视频创建禁停区域配置")
-    print("=" * 50)
-
-    video_path = r"D:\数据集\视频\金塘燕头山闸全景球机（全景）_20260129223009"
-
-    # 检查视频是否存在
-    if not Path(video_path).exists():
-        print(f"视频文件不存在: {video_path}")
-        print("将创建基于典型监控场景的默认禁停区域配置")
-        video_path = None
-    else:
-        print(f"找到视频文件: {video_path}")
-
-    # 创建配置器（不传入视频路径以避免打开视频）
-    configurator = ZoneConfigurator(None, "output")
-
-    # 为监控视频创建典型的禁停区域
-    # 假设这是一个路口监控视频，创建常见的禁停区域
-    monitoring_zones = [
-        {
-            "name": "路口禁停区A",
-            "type": "rectangle",
-            "bbox": [200, 300, 600, 500],
-            "color": [0, 0, 255],
-            "description": "路口东北角禁停区域"
-        },
-        {
-            "name": "路口禁停区B",
-            "type": "rectangle",
-            "bbox": [1000, 300, 1400, 500],
-            "color": [0, 0, 255],
-            "description": "路口西北角禁停区域"
-        },
-        {
-            "name": "路口禁停区C",
-            "type": "rectangle",
-            "bbox": [200, 700, 600, 900],
-            "color": [0, 0, 255],
-            "description": "路口东南角禁停区域"
-        },
-        {
-            "name": "路口禁停区D",
-            "type": "rectangle",
-            "bbox": [1000, 700, 1400, 900],
-            "color": [0, 0, 255],
-            "description": "路口西南角禁停区域"
-        },
-        {
-            "name": "路中央禁停区",
-            "type": "rectangle",
-            "bbox": [600, 400, 1000, 800],
-            "color": [0, 0, 255],
-            "description": "路口中央区域禁停"
-        }
-    ]
-
-    # 清空现有配置并添加新的
-    configurator.zones = monitoring_zones
-    configurator.save_zones()
-
-    print(f"为监控视频创建了 {len(monitoring_zones)} 个禁停区域")
-    print("\n禁停区域详情:")
-    for zone in monitoring_zones:
-        print(f"  - {zone['name']}: {zone['bbox']} - {zone['description']}")
-
-    print(f"\n配置已保存到: output/no_parking_zones.json")
-    print("\n使用方法:")
-    print("1. 运行系统时会自动加载这些禁停区域")
-    print("2. 如需修改区域，可以运行:")
-    print("   python configure_zones.py [视频路径]")
-    print("3. 然后在可视化界面中重新绘制区域")
-
-    return True
+    return zones
 
 def main():
     """主函数"""
-    print("禁停区域配置测试工具")
-    print("=" * 60)
+    import argparse
 
-    # 测试基本功能
-    success1 = test_zone_config()
+    parser = argparse.ArgumentParser(description='禁停区域配置工具')
+    parser.add_argument('media', help='背景媒体路径（图片或视频，用于可视化配置）')
+    parser.add_argument('-o', '--output', default='output', help='输出目录')
 
-    # 为用户视频创建配置
-    success2 = create_video_zones_config()
+    args = parser.parse_args()
 
-    print("\n" + "=" * 60)
-    if success1 and success2:
-        print("[SUCCESS] 禁停区域配置测试全部完成！")
-        print("\n您的违停检测系统现在具备了完整的禁停区域配置功能。")
-    else:
-        print("[WARNING] 部分测试未完成，请检查相关配置。")
+    # 检查媒体文件是否存在
+    media_path = Path(args.media)
+    if not media_path.exists():
+        print(f"错误: 媒体文件不存在 {args.media}")
+        return
 
-    print("\n[提示] 使用提示:")
-    print("- 禁停区域配置文件: output/no_parking_zones.json")
-    print("- 运行违停检测: python parking_violation_system.py [视频路径]")
-    print("- 可视化配置: python configure_zones.py [视频路径]")
+    print(f"媒体文件: {args.media}")
+    print(f"文件类型: {'视频' if media_path.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'] else '图片'}")
+
+    # 创建配置器
+    configurator = ZoneConfigurator(args.media, args.output)
+
+    # 运行配置界面
+    configurator.run_configuration()
+
+    print("\n配置完成！")
+    print(f"禁停区域配置已保存到: {configurator.zones_file}")
 
 if __name__ == "__main__":
     main()
